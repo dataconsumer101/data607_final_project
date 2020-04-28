@@ -1,0 +1,148 @@
+---
+title: "Data607 Final Project"
+author: "Leo Yi & Christopher Bloome"
+date: "4/28/2020"
+output:
+  html_document:
+    highlight: pygments
+    theme: cosmo
+    toc: TRUE
+    toc_depth: 3    
+    toc_float:
+      collapsed: true
+      smooth_scroll: true
+      number_sections: true    
+
+---
+
+<style type="text/css">
+
+code.r{
+  font-size: 12px;
+  font-family: Consolas;
+}
+
+pre {
+  font-size: 12px;
+}
+
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+We want to research the association of basic education and its impact to different aspects of society. There's a common understanding that education is beneficial for society and as people become more educated, society becomes more civilized. This is paired with the idea that when evaluating a scale of animal instincts to conscious human actions-- its better for society if its members are more like wise sages and less like impulsive cave men.
+
+The data that we will use to explore these assumptions and its effects on different facets of society will be sourced from gapminder.
+
+To proxy or measure basic education, we'll take a look at literacy rates of adults, completion rates of primary school, and expenditure per student as a % of GDP. Primary school completion rates can be influenced by many factors, but our initial idea is that this is a suitable proxy to measure how much a society values and is capable of putting their children through school.
+
+We'll then be looking at a few other factors that we believe may be related and discuss the results of regression models.
+
+## Preparing the data
+
+In this section, lets grab all the data from gapminder and tidy it into one dataframe that we'll then use to create the models.
+
+All data has been downloaded from [Gapminder](https://www.gapminder.org/data/)
+
+
+
+### Packages
+
+These are the packages we'll be using for this project:
+
+```{r, warning = F, message = F}
+library(tidyr)
+library(dplyr)
+library(stringr)
+library(ggplot2)
+library(scales)
+```
+
+### Predictor Variables
+
+Lets download, join, and tidy the two data sources we'll be looking at for our predictor variables. Both are csv files that contain metrics by country and year.
+
+```{r}
+# Literacy Rate
+l_rate <- read.csv('https://raw.githubusercontent.com/dataconsumer101/data607_final_project/master/literacy_rate_adult_total_percent_of_people_ages_15_and_above.csv',
+                   stringsAsFactors = F)
+
+# Primary School Completion Rate
+pc_rate <- read.csv('https://raw.githubusercontent.com/dataconsumer101/data607_final_project/master/primary_completion_rate_total_percent_of_relevant_age_group.csv',
+                    stringsAsFactors = F)
+
+# Primary School Expenditure Rate (% of GDP per Person)
+e_rate <- read.csv('https://raw.githubusercontent.com/dataconsumer101/data607_final_project/master/expenditure_per_student_primary_percent_of_gdp_per_person.csv',
+                   stringsAsFactors = F)
+
+```
+
+Since all of the gapminder datasets seem to be in the same format, with countries as rows and years as columns, lets use a function to unpivot them into country and year in one line, since those will be the observations we'll be using.
+
+```{r}
+unpivot <- function(src_df, metric) {
+  df <- gather(src_df, year, val, -country) %>%
+    filter(!is.na(val)) %>%
+    mutate(year = as.numeric(str_replace_all(year, 'X', '')))
+  
+  names(df)[3] <- metric
+  
+  return(df)
+}
+
+# Unpivot Raw Data
+l_rate_tall <- unpivot(l_rate, 'literacy_rate')
+pc_rate_tall <- unpivot(pc_rate, 'pschool_crate')
+e_rate_tall <- unpivot(e_rate, 'pschool_erate')
+
+# Combine Data for Predictor Varaibles Dataframe
+pv_df <- l_rate_tall %>%
+  full_join(pc_rate_tall, by = c('country' = 'country', 'year' = 'year')) %>%
+  full_join(e_rate_tall, by = c('country' = 'country', 'year' = 'year'))
+
+head(pv_df)
+
+# Observations will all 3 metrics
+pv_df2 <- filter(pv_df, !is.na(literacy_rate) & !is.na(pschool_crate) & !is.na(pschool_erate))
+
+nrow(pv_df2)
+```
+It looks like there's only 144 country-year observations with all 3 metrics, which may make it difficult to use all three predictor variables in one model.
+
+Lets evaluate which variables have enough data that we can use:
+
+```{r}
+pvars <- pv_df %>%
+  mutate(l = ifelse(is.na(literacy_rate), 0, 1),
+          c = ifelse(is.na(pschool_crate), 0, 1),
+          e = ifelse(is.na(pschool_erate), 0, 1),
+          n = l + c + e) %>%
+  group_by(n) %>%
+  summarize(ns = n(),
+            ls = sum(l),
+            cs = sum(c),
+            es = sum(e)) %>%
+  arrange(desc(n))
+
+pvars
+```
+
+This is a table that shows the instances of the variables. 
+
+* n = the number of variables, out of 3, that exist per observation.
+
+There are 144 observations with all 3 varaibles, 1303 observations with 2 variables, and 3684 with only 1 variable.
+
+```{r}
+nrow(l_rate_tall)
+nrow(pc_rate_tall)
+nrow(e_rate_tall)
+```
+
+It looks like the primary school completion rate has the most observations, but we'll still need to determine which variables can be used based on the country-year match in the response variables.
+
+
