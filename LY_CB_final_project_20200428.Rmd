@@ -60,6 +60,7 @@ library(dplyr)
 library(stringr)
 library(ggplot2)
 library(scales)
+library(GGally)
 ```
 
 ### Predictor Variables
@@ -138,11 +139,47 @@ This is a table that shows the instances of the variables.
 There are 144 observations with all 3 varaibles, 1303 observations with 2 variables, and 3684 with only 1 variable.
 
 ```{r}
-nrow(l_rate_tall)
-nrow(pc_rate_tall)
-nrow(e_rate_tall)
+cat('Number of Rows for literacy rate dataframe:', nrow(l_rate_tall), '\nNumber of Distinct Countries:', n_distinct(l_rate_tall$country))
+cat('Number of Rows for primary school completion rate dataframe:', nrow(pc_rate_tall), '\nNumber of Distinct Countries:', n_distinct(pc_rate_tall$country))
+cat('Number of Rows for primary school expenditure rate dataframe:', nrow(e_rate_tall), '\nNumber of Distinct Countries:', n_distinct(e_rate_tall$country))
 ```
 
 It looks like the primary school completion rate has the most observations, but we'll still need to determine which variables can be used based on the country-year match in the response variables.
 
+### Murder and Suicide
 
+For most people, the idea of murder and suicide is a rare occurence in civilized society. We hear about these acts of violence rarely with people we know first hand, and unfortunately quite often in the news.
+
+It wouldn't be a huge leap to say that people who are more educated are less likely to be involved in these kinds of situations, but we'll take a look at the data to see if this association can be supported by data.
+
+#### Preparing the Data
+
+Below, we'll import the data from gapminder, tidy it, and add the variables to our combined predictor variable dataset.
+
+```{r}
+# Murder Rate per 100k People
+m_rate <- read.csv('https://raw.githubusercontent.com/dataconsumer101/data607_final_project/master/murder_per_100000_people.csv',
+                   stringsAsFactors = F)
+
+# Suicide Rate per 100k People
+s_rate <- read.csv('https://raw.githubusercontent.com/dataconsumer101/data607_final_project/master/suicide_per_100000_people.csv',
+                    stringsAsFactors = F)  
+
+# Let's use the same function we created earlier to unpivot year columns
+m_rate_tall <- unpivot(m_rate, 'murder_rate')
+s_rate_tall <- unpivot(s_rate, 'suicide_rate')
+
+
+df <- pv_df %>%
+  full_join(m_rate_tall, by = c('country' = 'country', 'year' = 'year')) %>%
+  full_join(s_rate_tall, by = c('country' = 'country', 'year' = 'year'))
+
+head(df)
+```
+
+#### Exploring the Data
+
+Now that we have our working dataframe, lets make a few observations through visualizations before we dive into modeling.
+
+```{r, warning = F, message = F}
+ggpairs(df, columns = 3:ncol(df))
