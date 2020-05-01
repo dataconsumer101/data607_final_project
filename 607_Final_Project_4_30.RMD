@@ -1,0 +1,215 @@
+---
+title: "Data607 Final Project"
+author: "Leo Yi & Christopher Bloome"
+date: "4/28/2020"
+output:
+  html_document:
+    highlight: pygments
+    theme: cosmo
+    toc: TRUE
+    toc_depth: 3    
+    toc_float:
+      collapsed: true
+      smooth_scroll: true
+      number_sections: true    
+
+---
+
+<style type="text/css">
+
+code.r{
+  font-size: 12px;
+  font-family: Consolas;
+}
+
+pre {
+  font-size: 12px;
+}
+
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+We want to research the association of basic education and its impact to different aspects of society. There's a common understanding that education is beneficial for society and as people become more educated, society becomes more civilized. This is paired with the idea that when evaluating a scale of animal instincts to conscious human actions-- its better for society if its members are more like wise sages and less like impulsive cave men.
+
+The data that we will use to explore these assumptions and its effects on different facets of society will be sourced from gapminder.
+
+To proxy or measure basic education, we'll take a look at literacy rates of adults, completion rates of primary school, and expenditure per student as a % of GDP. Primary school completion rates can be influenced by many factors, but our initial idea is that this is a suitable proxy to measure how much a society values and is capable of putting their children through school.
+
+We'll then be looking at a few other factors that we believe may be related and discuss the results of regression models.
+
+## Preparing the data
+
+In this section, lets grab all the data from gapminder and tidy it into one dataframe that we'll then use to create the models.
+
+All data has been downloaded from [Gapminder](https://www.gapminder.org/data/)
+
+
+
+### Packages
+
+These are the packages we'll be using for this project:
+
+```{r, warning = F, message = F}
+library(tidyr)
+library(dplyr)
+library(stringr)
+library(ggplot2)
+library(scales)
+library(GGally)
+```
+
+### Predictor Variables
+
+Lets download, join, and tidy the two data sources we'll be looking at for our predictor variables. Both are csv files that contain metrics by country and year.
+
+```{r}
+# Literacy Rate
+l_rate <- read.csv('https://raw.githubusercontent.com/dataconsumer101/data607_final_project/master/literacy_rate_adult_total_percent_of_people_ages_15_and_above.csv',
+                   stringsAsFactors = F)
+# Primary School Completion Rate
+pc_rate <- read.csv('https://raw.githubusercontent.com/dataconsumer101/data607_final_project/master/primary_completion_rate_total_percent_of_relevant_age_group.csv',
+                    stringsAsFactors = F)
+# Primary School Expenditure Rate (% of GDP per Person)
+e_rate <- read.csv('https://raw.githubusercontent.com/dataconsumer101/data607_final_project/master/expenditure_per_student_primary_percent_of_gdp_per_person.csv',
+                   stringsAsFactors = F)
+```
+
+Since all of the gapminder datasets seem to be in the same format, with countries as rows and years as columns, lets use a function to unpivot them into country and year in one line, since those will be the observations we'll be using.
+
+```{r}
+unpivot <- function(src_df, metric) {
+  df <- gather(src_df, year, val, -country) %>%
+    filter(!is.na(val)) %>%
+    mutate(year = as.numeric(str_replace_all(year, 'X', '')))
+  
+  names(df)[3] <- metric
+  
+  return(df)
+}
+# Unpivot Raw Data
+l_rate_tall <- unpivot(l_rate, 'literacy_rate')
+pc_rate_tall <- unpivot(pc_rate, 'pschool_crate')
+e_rate_tall <- unpivot(e_rate, 'pschool_erate')
+# Combine Data for Predictor Varaibles Dataframe
+pv_df <- l_rate_tall %>%
+  full_join(pc_rate_tall, by = c('country' = 'country', 'year' = 'year')) %>%
+  full_join(e_rate_tall, by = c('country' = 'country', 'year' = 'year'))
+head(pv_df)
+# Observations will all 3 metrics
+pv_df2 <- filter(pv_df, !is.na(literacy_rate) & !is.na(pschool_crate) & !is.na(pschool_erate))
+nrow(pv_df2)
+```
+It looks like there's only 144 country-year observations with all 3 metrics, which may make it difficult to use all three predictor variables in one model.
+
+Lets evaluate which variables have enough data that we can use:
+
+```{r}
+pvars <- pv_df %>%
+  mutate(l = ifelse(is.na(literacy_rate), 0, 1),
+          c = ifelse(is.na(pschool_crate), 0, 1),
+          e = ifelse(is.na(pschool_erate), 0, 1),
+          n = l + c + e) %>%
+  group_by(n) %>%
+  summarize(ns = n(),
+            ls = sum(l),
+            cs = sum(c),
+            es = sum(e)) %>%
+  arrange(desc(n))
+pvars
+```
+
+This is a table that shows the instances of the variables. 
+
+* n = the number of variables, out of 3, that exist per observation.
+
+There are 144 observations with all 3 varaibles, 1303 observations with 2 variables, and 3684 with only 1 variable.
+
+```{r}
+cat('Number of Rows for literacy rate dataframe:', nrow(l_rate_tall), '\nNumber of Distinct Countries:', n_distinct(l_rate_tall$country))
+cat('Number of Rows for primary school completion rate dataframe:', nrow(pc_rate_tall), '\nNumber of Distinct Countries:', n_distinct(pc_rate_tall$country))
+cat('Number of Rows for primary school expenditure rate dataframe:', nrow(e_rate_tall), '\nNumber of Distinct Countries:', n_distinct(e_rate_tall$country))
+```
+
+It looks like the primary school completion rate has the most observations, but we'll still need to determine which variables can be used based on the country-year match in the response variables.
+
+### Murder and Suicide
+
+For most people, the idea of murder and suicide is a rare occurence in civilized society. We hear about these acts of violence rarely with people we know first hand, and unfortunately quite often in the news.
+
+It wouldn't be a huge leap to say that people who are more educated are less likely to be involved in these kinds of situations, but we'll take a look at the data to see if this association can be supported by data.
+
+
+#### Preparing the Data
+
+Below, we'll import the data from gapminder, tidy it, and add the variables to our combined predictor variable dataset.
+
+```{r}
+# Murder Rate per 100k People
+m_rate <- read.csv('https://raw.githubusercontent.com/dataconsumer101/data607_final_project/master/murder_per_100000_people.csv',
+                   stringsAsFactors = F)
+# Suicide Rate per 100k People
+s_rate <- read.csv('https://raw.githubusercontent.com/dataconsumer101/data607_final_project/master/suicide_per_100000_people.csv',
+                    stringsAsFactors = F)  
+# Let's use the same function we created earlier to unpivot year columns
+m_rate_tall <- unpivot(m_rate, 'murder_rate')
+s_rate_tall <- unpivot(s_rate, 'suicide_rate')
+df <- pv_df %>%
+  full_join(m_rate_tall, by = c('country' = 'country', 'year' = 'year')) %>%
+  full_join(s_rate_tall, by = c('country' = 'country', 'year' = 'year'))
+head(df)
+```
+
+### Vaccination Rate
+
+Childhood vaccinations are one way in which sucsesful societies protect their population. Here in the United States, vaccinations are received for a variety of potential ailments. As any of these could serve as a proxy for society wellness, we pulled in each of these datasets to see which was the most complete. 
+
+
+```{r}
+# DTP vaccine percentage in 1 year olds
+dtp_rate <- read.csv('https://raw.githubusercontent.com/ChristopherBloome/607/master/dtp3_immunized_percent_of_one_year_olds.csv',
+                   stringsAsFactors = F)
+# Measels vaccine percentage in 1 year olds
+MCV_rate <- read.csv('https://raw.githubusercontent.com/ChristopherBloome/607/master/mcv_immunized_percent_of_one_year_olds.csv',
+                    stringsAsFactors = F)  
+# Teatenus vaccine percentage in newborns
+PAB_Rate <- read.csv('https://raw.githubusercontent.com/ChristopherBloome/607/master/pab_immunized_percent_of_newborns.csv',
+                    stringsAsFactors = F)  
+# Hepatitis vaccine percentage in 1 year olds
+hepb3_rate <- read.csv('https://raw.githubusercontent.com/ChristopherBloome/607/master/hepb3_immunized_percent_of_one_year_olds.csv',
+                    stringsAsFactors = F)  
+
+
+
+
+# Let's use the same function we created earlier to unpivot year columns
+dtp_rate_tall <- unpivot(m_rate, 'dtp_rate')
+MCV_rate_tall <- unpivot(s_rate, 'MCV_rate')
+PAB_rate_tall <- unpivot(m_rate, 'PAB_rate')
+hepb3_rate_tall <- unpivot(s_rate, 'hepb3_rate')
+dfVax <- pv_df %>%
+  full_join(dtp_rate_tall, by = c('country' = 'country', 'year' = 'year')) %>%
+  full_join(MCV_rate_tall, by = c('country' = 'country', 'year' = 'year')) %>%
+  full_join(PAB_rate_tall, by = c('country' = 'country', 'year' = 'year')) %>%
+  full_join(hepb3_rate_tall, by = c('country' = 'country', 'year' = 'year'))
+head(dfVax)
+summary(dfVax)
+```
+Looking at the summary, the quantity of NAs, each of these have a fairly high and similar quantity of responses. Additonally, it seems like two of these may be repeated datasets. It is unclear if this is an error in data storage or collection, however, for the purposes of this project, we will focus on measels and DTP. 
+```{r}
+df <- df %>%
+  full_join(dtp_rate_tall, by = c('country' = 'country', 'year' = 'year')) %>%
+  full_join(MCV_rate_tall, by = c('country' = 'country', 'year' = 'year'))
+head(df)
+```
+#### Exploring the Data
+
+Now that we have our working dataframe, lets make a few observations through visualizations before we dive into modeling.
+
+```{r, warning = F, message = F}
+ggpairs(df, columns = 3:ncol(df))
+```
