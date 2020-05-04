@@ -63,7 +63,7 @@ library(GGally)
 library(caret)
 ```
 
-### Predictor Variables
+### Explanatory Variables
 
 Lets download, join, and tidy the two data sources we'll be looking at for our predictor variables. Both are csv files that contain metrics by country and year.
 
@@ -139,9 +139,7 @@ It looks like the primary school completion rate has the most observations, but 
 
 
 
-### Preparing the Data
-
-Below, we'll import the data from gapminder, tidy it, and add the variables to our combined predictor variable dataset.
+### Dependent Variables
 
 #### Murder and Suicide
 
@@ -525,11 +523,11 @@ ggpairs(df, columns = 3:ncol(df))
 
 Its no surprise that literacy rate and primary school completion rate have a strong correlation. Reading is taught in primary school and we can make the assumption that even with the gap in time between when a person completes primary school and when they're considered an adult, that the primary school completion rate can be a proxy for the effective value of basic education within a nation in any given year.
 
-Similiarly, dtp and MCV vaccine rates are very correlated. These vaccines became widely availiable around the same time, and their acceptance and usuage is largely colinear. 
+Similiarly, dtp and MCV vaccine rates are very correlated. These vaccines became widely available around the same time, and their acceptance and usuage is largely colinear. 
 
-Looking toward some less anticpated corrleations, there is a rather strong correlation between vaccine rate and primary school completion rate. Countries with a well organized public school system are more likely to make vaccinations compulsary. While it is true that the vaccination rate relates to vaccines given to childern in their first year of life - it is not hard to imagine that vaccination requirements in public school is an indication of a broder acceptance of vaccinations in that society.
+Looking toward some less anticpated correlations, there is a rather strong correlation between vaccine rate and primary school completion rate. Countries with a well organized public school system are more likely to make vaccinations compulsary. While it is true that the vaccination rate relates to vaccines given to childern in their first year of life - it is not hard to imagine that vaccination requirements in public school is an indication of a broder acceptance of vaccinations in that society.
 
-Though unrelated to our predictor variables, the strongest correlation to the inequality index is sucide rate. Interestingly enough, there's a weak correlation between adult literacy rate and the suicide rate. It's a bit scary to think that there's a link between being able to read and suicide. There's also a weak negative correlation between the primary school completion rate and the murder rate.
+Interestingly enough, there's a weak correlation between adult literacy rate and the suicide rate. It's a bit scary to think that there's a link between being able to read and suicide. There's also a weak negative correlation between the primary school completion rate and the murder rate.
 
 ### Murder
 
@@ -627,7 +625,7 @@ It looks like this multiple regression model isn't very robust.
 
 Let's try to build a random forest model using literacy and primary school completion rate as the dependent variable. Using all 3 variables wouldn't leave us with enough observations to run a reasonable model.
 
-#### Random Forest
+#### Suicide with Random Forest
 
 ```{r}
 set.seed(123)
