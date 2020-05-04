@@ -139,7 +139,7 @@ It looks like the primary school completion rate has the most observations, but 
 
 
 
-### Dependent Variables
+### Response Variables
 
 #### Murder and Suicide
 
