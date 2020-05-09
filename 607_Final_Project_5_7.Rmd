@@ -1,0 +1,971 @@
+---
+title: "Data607 Final Project"
+author: "Leo Yi & Christopher Bloome"
+date: "4/28/2020"
+output:
+  html_document:
+    highlight: pygments
+    theme: cosmo
+    toc: TRUE
+    toc_depth: 3    
+    toc_float:
+      collapsed: true
+      smooth_scroll: true
+      number_sections: true    
+
+---
+
+<style type="text/css">
+
+code.r{
+  font-size: 12px;
+  font-family: Consolas;
+}
+
+pre {
+  font-size: 12px;
+  font-family: Consolas;  
+}
+
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+We want to research the association of basic education and its impact to different aspects of society. There's a common understanding that education is beneficial for society and as people become more educated, society becomes more civilized. This is paired with the idea that when evaluating a scale of animal instincts to conscious human actions-- its better for society if its members are more like wise sages and less like impulsive cave men.
+
+The data that we will use to explore these assumptions and its effects on different facets of society will be sourced from gapminder.
+
+To proxy or measure basic education, we'll take a look at literacy rates of adults, completion rates of primary school, and expenditure per student as a % of GDP. Primary school completion rates can be influenced by many factors, but our initial idea is that this is a suitable proxy to measure how much a society values and is capable of putting their children through school.
+
+We'll then be looking at a few other factors that we believe may be related and discuss the results of regression models.
+
+## Preparing the data
+
+In this section, lets grab all the data from gapminder and tidy it into one dataframe that we'll then use to create the models.
+
+All data has been downloaded from [Gapminder](https://www.gapminder.org/data/)
+
+#### Packages
+
+These are the packages we'll be using for this project:
+
+```{r, warning = F, message = F}
+library(tidyr)
+library(dplyr)
+library(stringr)
+library(ggplot2)
+library(scales)
+library(GGally)
+library(caret)
+library(tidymodels)
+```
+
+### Explanatory Variables
+
+Lets download, join, and tidy the two data sources we'll be looking at for our predictor variables. Both are csv files that contain metrics by country and year.
+
+```{r}
+# Literacy Rate
+l_rate <- read.csv('https://raw.githubusercontent.com/dataconsumer101/data607_final_project/master/literacy_rate_adult_total_percent_of_people_ages_15_and_above.csv',
+                   stringsAsFactors = F)
+# Primary School Completion Rate
+pc_rate <- read.csv('https://raw.githubusercontent.com/dataconsumer101/data607_final_project/master/primary_completion_rate_total_percent_of_relevant_age_group.csv',
+                    stringsAsFactors = F)
+# Primary School Expenditure Rate (% of GDP per Person)
+e_rate <- read.csv('https://raw.githubusercontent.com/dataconsumer101/data607_final_project/master/expenditure_per_student_primary_percent_of_gdp_per_person.csv',
+                   stringsAsFactors = F)
+```
+
+Since all of the gapminder datasets seem to be in the same format, with countries as rows and years as columns, lets use a function to unpivot them into country and year in one line, since those will be the observations we'll be using.
+
+```{r}
+unpivot <- function(src_df, metric) {
+  df <- gather(src_df, year, val, -country) %>%
+    filter(!is.na(val)) %>%
+    mutate(year = as.numeric(str_replace_all(year, 'X', '')))
+  
+  names(df)[3] <- metric
+  
+  return(df)
+}
+# Unpivot Raw Data
+l_rate_tall <- unpivot(l_rate, 'literacy_rate')
+pc_rate_tall <- unpivot(pc_rate, 'pschool_crate')
+e_rate_tall <- unpivot(e_rate, 'pschool_erate')
+# Combine Data for Predictor Varaibles Dataframe
+pv_df <- l_rate_tall %>%
+  full_join(pc_rate_tall, by = c('country' = 'country', 'year' = 'year')) %>%
+  full_join(e_rate_tall, by = c('country' = 'country', 'year' = 'year'))
+head(pv_df)
+# Observations will all 3 metrics
+pv_df2 <- filter(pv_df, !is.na(literacy_rate) & !is.na(pschool_crate) & !is.na(pschool_erate))
+nrow(pv_df2)
+```
+
+It looks like there's only 144 country-year observations with all 3 metrics, which may make it difficult to use all three predictor variables in one model.
+
+Lets evaluate which variables have enough data that we can use:
+
+```{r}
+pvars <- pv_df %>%
+  mutate(l = ifelse(is.na(literacy_rate), 0, 1),
+          c = ifelse(is.na(pschool_crate), 0, 1),
+          e = ifelse(is.na(pschool_erate), 0, 1),
+          n = l + c + e) %>%
+  group_by(n) %>%
+  summarize(ns = n(),
+            ls = sum(l),
+            cs = sum(c),
+            es = sum(e)) %>%
+  arrange(desc(n))
+pvars
+```
+
+This is a table that shows the instances of the variables. 
+
+* n = the number of variables, out of 3, that exist per observation.
+
+There are 144 observations with all 3 variables, 1303 observations with 2 variables, and 3684 with only 1 variable.
+
+```{r}
+cat('Number of Rows for literacy rate dataframe:', nrow(l_rate_tall), '\nNumber of Distinct Countries:', n_distinct(l_rate_tall$country))
+cat('Number of Rows for primary school completion rate dataframe:', nrow(pc_rate_tall), '\nNumber of Distinct Countries:', n_distinct(pc_rate_tall$country))
+cat('Number of Rows for primary school expenditure rate dataframe:', nrow(e_rate_tall), '\nNumber of Distinct Countries:', n_distinct(e_rate_tall$country))
+```
+
+It looks like the primary school completion rate has the most observations, but we'll still need to determine which variables can be used based on the country-year match in the response variables.
+
+### Murder and Suicide
+
+For most people, the idea of murder and suicide is a rare occurence in civilized society. We hear about these acts of violence rarely with people we know first hand, and unfortunately quite often in the news.
+
+It wouldn't be a huge leap to say that people who are more educated are less likely to be involved in these kinds of situations, but we'll take a look at the data to see if this association can be supported by data.
+
+
+```{r}
+# Murder Rate per 100k People
+m_rate <- read.csv('https://raw.githubusercontent.com/dataconsumer101/data607_final_project/master/murder_per_100000_people.csv',
+                   stringsAsFactors = F)
+# Suicide Rate per 100k People
+s_rate <- read.csv('https://raw.githubusercontent.com/dataconsumer101/data607_final_project/master/suicide_per_100000_people.csv',
+                    stringsAsFactors = F)  
+# Let's use the same function we created earlier to unpivot year columns
+m_rate_tall <- unpivot(m_rate, 'murder_rate')
+s_rate_tall <- unpivot(s_rate, 'suicide_rate')
+df <- pv_df %>%
+  full_join(m_rate_tall, by = c('country' = 'country', 'year' = 'year')) %>%
+  full_join(s_rate_tall, by = c('country' = 'country', 'year' = 'year'))
+head(df)
+```
+
+### Vaccination Rate
+
+Childhood vaccinations are one way in which successful societies protect their population. Here in the United States, vaccinations are received for a variety of potential ailments. As any of these could serve as a proxy for society wellness and mindfulness, we pulled in each of these datasets to see which was the most complete. 
+
+
+```{r}
+# DTP vaccine percentage in 1 year olds
+DTP_rate <- read.csv('https://raw.githubusercontent.com/ChristopherBloome/607/master/dtp3_immunized_percent_of_one_year_olds.csv',
+                   stringsAsFactors = F)
+# Measels vaccine percentage in 1 year olds
+MCV_rate <- read.csv('https://raw.githubusercontent.com/ChristopherBloome/607/master/mcv_immunized_percent_of_one_year_olds.csv',
+                    stringsAsFactors = F)  
+# Teatenus vaccine percentage in newborns
+PAB_rate <- read.csv('https://raw.githubusercontent.com/ChristopherBloome/607/master/pab_immunized_percent_of_newborns.csv',
+                    stringsAsFactors = F)  
+# Hepatitis vaccine percentage in 1 year olds
+hepb3_rate <- read.csv('https://raw.githubusercontent.com/ChristopherBloome/607/master/hepb3_immunized_percent_of_one_year_olds.csv',
+                    stringsAsFactors = F)  
+# Let's use the same function we created earlier to unpivot year columns
+DTP_rate_tall <- unpivot(DTP_rate, 'DTP_rate')
+MCV_rate_tall <- unpivot(MCV_rate, 'MCV_rate')
+PAB_rate_tall <- unpivot(PAB_rate, 'PAB_rate')
+hepb3_rate_tall <- unpivot(hepb3_rate, 'hepb3_rate')
+dfVax <- pv_df %>%
+  full_join(DTP_rate_tall, by = c('country' = 'country', 'year' = 'year')) %>%
+  full_join(MCV_rate_tall, by = c('country' = 'country', 'year' = 'year')) %>%
+  full_join(PAB_rate_tall, by = c('country' = 'country', 'year' = 'year')) %>%
+  full_join(hepb3_rate_tall, by = c('country' = 'country', 'year' = 'year'))
+summary(dfVax)
+```
+
+Looking at the quantity of NAs in each variable in the summary, it is clear there is significantly more data on DTP and measles vaccinations. For these reasons we will exclude the PAB and HepB vaccination datasets. 
+
+```{r}
+df <- df %>%
+  full_join(DTP_rate_tall, by = c('country' = 'country', 'year' = 'year')) %>%
+  full_join(MCV_rate_tall, by = c('country' = 'country', 'year' = 'year'))
+head(df)
+```
+
+### Inequality 
+
+The Gini coefficient, a measure of inequality, is another metric in this dataset we wanted to explore. The Gini coefficient is on a scale from 1 to 100, with higher numbers implying a greater rate of inequality. In this dataset, it appears that each country has a Gini coefficient value for all years, making it ideal for our purposes.  
+
+```{r}
+Gini_rate <- read.csv('https://raw.githubusercontent.com/ChristopherBloome/607/master/gini.csv',
+                    stringsAsFactors = F) 
+Gini_rate_tall <- unpivot(Gini_rate, 'Gini_rate')
+df <- df %>%
+  full_join(Gini_rate_tall, by = c('country' = 'country', 'year' = 'year'))
+```
+
+
+
+## Exploring the Data
+
+Now that we have our working dataframe, lets make a few observations through visualizations before we dive into modeling.
+
+### Literacy Rate
+
+```{r, warning = F, message = F}
+# break countries in groups
+group_count <- 6
+lgrp <- distinct(l_rate, country) %>%
+  mutate(grp = ntile(country, group_count))
+# Literacy Rates Over Time
+inner_join(l_rate_tall, lgrp, by = c('country' = 'country')) %>%
+ggplot(aes(x = year, y = literacy_rate, color = country)) +
+  geom_line() +
+  theme_bw() +
+  theme(legend.position = 'none') +
+  facet_wrap(~grp) +
+  labs(title = 'Literacy Rate Over Time',
+       caption = 'Each Line Is a Country',
+       y = '% of Adults',
+       x = element_blank()) 
+```
+
+The plot was split into 6 groups because it would be difficult to see all the lines overlapping on one chart.
+
+Generally, countries are seeing higher rates of adult literacy over time. This may be a result of countries advancing and growing. There are some countries that seem to be declining in literacy, perhaps in areas of war? Let's take a look.
+
+```{r}
+lr_mm <- group_by(l_rate_tall, country) %>%
+  summarize(min_yr = min(year),
+            max_yr = max(year)) %>%
+  left_join(l_rate_tall, by = c('country' = 'country', 'min_yr' = 'year')) %>%
+  left_join(l_rate_tall, by = c('country' = 'country', 'max_yr' = 'year')) %>%
+  mutate(change = literacy_rate.y - literacy_rate.x) %>%
+  filter(change < 0) %>%
+  arrange(change)
+lr_mm
+bind_rows(select(lr_mm, country, yr = min_yr, val = literacy_rate.x),
+          select(lr_mm, country, yr = max_yr, val = literacy_rate.y)) %>%
+  ggplot(aes(x = yr, y = val, color = country)) +
+  geom_line(size = 1) +
+  theme_bw() +
+  labs(title = 'Overall Declining Literacy Rates',
+       y = '% of Adults',
+       x = element_blank()) 
+```
+
+It seems like some countries in Africa are struggling with improving adult literacy. I'm not quite sure about the history of those countries, but its possibly a sampling error.
+
+Albania, Tonga, and Mongolia also have shown a net decline, but almost all of the population is literate. There may just be a ceiling to literacy in any given country, given that some people are unable to learn for reasons other than infrastructure.
+
+### Primary School Completion Rate
+
+```{r, warning = F, message = F}
+# break countries in groups
+group_count <- 6
+cgrp <- distinct(pc_rate, country) %>%
+  mutate(grp = ntile(country, group_count))
+# Primary School Completion Rates Over Time
+inner_join(pc_rate_tall, cgrp, by = ('country' = 'country')) %>%
+  ggplot(aes(x = as.Date(ISOdate(year,1,1)), y = pschool_crate, color = country)) +
+  geom_line() +
+  theme_bw() +
+  theme(legend.position = 'none') +
+  facet_wrap(~grp) +
+  labs(title = 'Primary School Completion Rate Over Time',
+       y = '% of Adults',
+       x = element_blank()) 
+```
+
+Again, We split the countries into 8 groups since it would be too messy to view on one chart. The views are linear models of the data points for each country, which shows a general trend towards higher completion rate over time.
+
+
+```{r}
+pc_mm <- group_by(pc_rate_tall, country) %>%
+  summarize(min_yr = min(year),
+            max_yr = max(year)) %>%
+  left_join(pc_rate_tall, by = c('country' = 'country', 'min_yr' = 'year')) %>%
+  left_join(pc_rate_tall, by = c('country' = 'country', 'max_yr' = 'year')) %>%
+  mutate(change = pschool_crate.y - pschool_crate.x) %>%
+  filter(change < 0) %>%
+  arrange(change)
+pc_mm
+bind_rows(select(pc_mm, country, yr = min_yr, val = pschool_crate.x),
+          select(pc_mm, country, yr = max_yr, val = pschool_crate.y)) %>%
+  ggplot(aes(x = yr, y = val, color = country)) +
+  geom_line(size = 1) +
+  theme_bw() +
+  labs(title = 'Overall Declining Primary School Completion Rates',
+       y = '% of Adults',
+       x = element_blank()) 
+```
+
+
+### Primary School Expediture Rate 
+
+(% of GDP)
+
+```{r}
+group_count <- 6
+egrp <- distinct(e_rate, country) %>%
+  mutate(grp = ntile(country, group_count))
+inner_join(e_rate_tall, egrp, by = c('country' = 'country')) %>%
+ggplot(aes(x = year, y = pschool_erate, color = country)) +
+  geom_line() +
+  theme_bw() +
+  theme(legend.position = 'none') +
+  facet_wrap(~grp) +
+  labs(title = 'Primary School Expenditure Rate Over Time',
+       y = '% of Adults',
+       x = element_blank()) 
+```
+
+For most countries, it looks almost like the rate of gdp expenditure for primary school remained relatively steady throughout the years. There do seem to be some countries that invested quite a bit into their childrens' future. Let's isolate some of those countries and take a look.
+
+```{r, warning = F}
+filter(e_rate_tall, pschool_erate >= 33.33) %>%
+  distinct(country) %>%
+  inner_join(e_rate_tall, by = c('country' = 'country')) %>%
+  ggplot(aes(x = year, y = pschool_erate, color = country)) +
+  geom_line() +
+  facet_wrap(~country) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1),
+        legend.position = 'none') +
+  geom_hline(yintercept = 33.33, linetype = 3) +
+  labs(title = 'High Spenders on Primary School',
+       subtitle = 'Expenditure Rate >= 33.33',
+       y = 'Primary School Expenditure Rate',
+       x = element_blank())
+```
+
+Here, we're looking at all countries in the dataset that have at any point spent at least 1/3 of GDP per person on primary school education. It's an arbitrary amount, but that's 1/3 the value of each person towards furthering basic education. Cuba is quite impressive and seems like its still rising, where Ukraine is seeing the opposite effect.
+
+### Murder Rate 
+
+(per 100k People)
+
+```{r}
+ggplot(m_rate_tall, aes(x = year, y = murder_rate, color = country)) +
+  geom_line() +
+  theme_bw() + 
+  theme(legend.position = 'none') +
+  labs(title = 'Murder Rate by Year by Country',
+       x = element_blank(),
+       y = 'Murders per 100k People')
+```
+
+It looks like most countries are grounded to low levels of murder, but at present, most countries are near zero. Since travel is quite common in this day and age, let's look at the top and bottom countries for murder rate, so we know where or where not to plan our next trip.
+
+Let's look at the most recent year for every country and exclude anything from before a decade ago, or 2010.
+
+```{r}
+# Look at only the latest year of data for each country
+m_ly <- group_by(m_rate_tall, country) %>%
+  summarize(year = max(year)) %>%
+  inner_join(m_rate_tall, by = c('country' = 'country', 'year' = 'year')) %>%
+  filter(year >= 2010) %>%
+  mutate(country_year = str_c(country, ' (', year, ')', sep = ''))
+top_x <- 10
+  
+# Most Dangerous Countries
+arrange(m_ly, desc(murder_rate))[1:top_x,] %>%
+ggplot(aes(x = reorder(country_year, murder_rate), y = murder_rate)) +
+  geom_col() +
+  coord_flip() +
+  theme_bw() +
+  labs(title = 'Countries With Highest Murder Rate',
+       y = 'Murders per 100K People',
+       x = element_blank())
+# Least Dangerous Countries
+arrange(m_ly, murder_rate)[1:top_x,] %>%
+ggplot(aes(x = reorder(country_year, desc(murder_rate)), y = murder_rate)) +
+  geom_col() +
+  coord_flip() +
+  theme_bw() +
+  labs(title = 'Countries With Lowest Murder Rate',
+       y = 'Murders per 100K People',
+       x = element_blank())
+```
+
+Oman seems to be the safest country if you're worried about being murdered. Keep mind that this is only one crime and that the numbers are reported or sampled by different methods, so this isn't a list of safest countries, just a list of the countries that reported the lowest murder rate.
+
+### Suicide Rate
+
+(per 100k People)
+
+```{r}
+group_count <- 6
+sgrp <- distinct(s_rate, country) %>%
+  mutate(grp = ntile(country, group_count))
+inner_join(s_rate_tall, egrp, by = c('country' = 'country')) %>%
+ggplot(aes(x = year, y = suicide_rate, color = country)) +
+  geom_line() +
+  facet_wrap(~grp) +
+  theme_bw() + 
+  theme(legend.position = 'none') +
+  labs(title = 'Suicide Rate by Year by Country',
+       x = element_blank(),
+       y = 'Suicide Rate Per 100K People')
+```
+
+For most countries, the rate is pretty low, and for others it seems to peak. Lets pick out some of the countries that had a high level of suicides at one point and see what we find.
+
+
+```{r}
+filter(s_rate_tall, suicide_rate >= 25) %>%
+  distinct(country) %>%
+  inner_join(s_rate_tall, by = c('country' = 'country')) %>%
+  ggplot(aes(x = year, y = suicide_rate, color = country)) +
+  geom_line() +
+  facet_wrap(~country) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1),
+        legend.position = 'none') +
+  labs(title = 'Top Suicide Rates',
+       subtitle = '>= 25 / 100,000',
+       y = 'Suicide Rate Per 100K People',
+       x = element_blank())
+```
+
+Take a look at Hungary-- communism ended there in 1989, which coincides with the peak of suicides. Thankfully, the suicide rate there has been declining ever since. 
+
+Suriname, with a prominent peak of suicides in the 80's, went through historical changes that seemed to coincide with these figures. A coup d'état and political uncertainty might contribute to these figures.
+
+The other countries above likely to have their reasons why there's so much psychological pressure within their borders, whether we can find them or not.
+
+
+### Vaccination rates
+
+Lets start by visualizing the raw data to see if there are any obvious differences in vaccination rates and the change of this rate over time for each of our vaccines; DTP and MCV.
+
+
+```{r}
+
+Group_df <- dplyr::distinct(df, country)
+Group_df$grp <- ntile(Group_df,6)
+
+inner_join(DTP_rate_tall, Group_df, by = c('country' = 'country')) %>%
+  ggplot(aes(x = year, y = DTP_rate, color = country)) +
+  geom_line() +
+  facet_wrap(~grp) +
+  theme_bw() + 
+  theme(legend.position = 'none') +
+  labs(title = 'DTP Vaccination Rate by Country',
+       x = element_blank(),
+       subtitle = 'Complete cycle received before 1st birthday')
+inner_join(MCV_rate_tall, Group_df, by = c('country' = 'country')) %>%
+  ggplot(aes(x = year, y = MCV_rate, color = country)) +
+  geom_line() +
+  facet_wrap(~grp) +
+  theme_bw() + 
+  theme(legend.position = 'none') +
+  labs(title = 'MCV Vaccination Rate by Country',
+       x = element_blank(),
+       subtitle = 'Complete cycle received before 1st birthday')
+```
+
+As we see above, there is not much to distinguish these two vaccination rates. It makes sense that these are largely collinear, due to their history and rise in acceptance. 
+
+Lets visualize the change in rate of vaccination from 2 different groups, the most and least vaccination countries. As our sample is around 195 countries, 20 countries in each of these groups should be sufficient. 
+
+```{r warning=FALSE}
+#aggregate average vaccination rates across sample for both vaccines, compile into new DF. 
+Vaccine_Sum <- data.frame(DTP_rate$country,rowMeans(DTP_rate[,2:33],na.rm = TRUE,dims=1),rowMeans(MCV_rate[,2:33],na.rm = TRUE,dims=1))
+names(Vaccine_Sum)<-c("Country","Avg_DTP", "Avg_MCV")
+Vaccine_Sum$Avg_Avg <- (Vaccine_Sum$Avg_DTP+Vaccine_Sum$Avg_MCV)/2
+#Select top and bottom 20 countries, label as such. 
+LVaxCounties <- top_n(Vaccine_Sum, 20, -Avg_Avg) 
+LVaxCounties$HL <- "L"
+HVaxCountries <- top_n(Vaccine_Sum, 20, Avg_Avg)
+HVaxCountries$HL <- "H" 
+EVaxCountries <- rbind(LVaxCounties, HVaxCountries)
+DTP_rate_tall %>%
+  left_join(EVaxCountries,by = c('country' = 'Country')) %>%
+  filter(country %in% EVaxCountries$Country) %>%
+ggplot(aes(x = year, y = DTP_rate, color = HL)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  theme_bw() + 
+  theme(legend.position = 'none') +
+  labs(title = 'DTP Vaccination Rate by Country',
+       x = element_blank(),
+       subtitle = '20 countries with lowest and highest rates of vaccinations')
+MCV_rate_tall %>%
+  left_join(EVaxCountries,by = c('country' = 'Country')) %>%
+  filter(country %in% EVaxCountries$Country) %>%
+ggplot(aes(x = year, y = MCV_rate, color = HL)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  theme_bw() + 
+  theme(legend.position = 'none') +
+  labs(title = 'MCV Vaccination Rate by Country',
+       x = element_blank(),
+       subtitle = '20 countries with lowest and highest rates of vaccinations') 
+```
+
+Here we can see how the most vaccinated countries already had high vaccination rates starting at the beginning of this dataset in 1980. While there was a slight increase leading to present day, the growth achieved by the countries with the lowest vaccination rate is staggering. 
+
+### Gini coefficient
+
+For our inequality index, lets again begin by viewing the raw data to see what stands out. Its worth noting that this dataset begins in 1800, well outside of the scope of our Explanatory variables. Lets limit our scope to something more reasonable. While many of our variables begin around 1970, lets start around WW1 to get a full picture in how inequality has changed leading up to modern times. 
+
+```{r}
+inner_join(Gini_rate_tall, Group_df, by = c('country' = 'country')) %>%
+  filter(year > 1910, year < 2020) %>%
+  ggplot(aes(x = year, y = Gini_rate, color = country)) +
+  geom_line() +
+  facet_wrap(~grp) +
+  theme_bw() + 
+  theme(legend.position = 'none') +
+  labs(title = 'Gini coefficient by Country',
+       x = element_blank(),
+       subtitle = 'Higher value implies more equitable society')
+```
+
+Here we see a potential issue with data quality. There are many countries whose inequality either never changed, or remained static for large periods of time. It is possible that this is approximated. What is unclear if this approximation is applied evenly for all countries or only in situations when better data was not available. 
+
+Lets plot the change in inequality for our most dynamic countries. We will calculate the Standard Deviation of the inequality index over the entire sample (from 1800) and select the top 20 countries. 
+
+
+```{r warning=FALSE}
+Gini_SD <- transform(Gini_rate, SD=apply(Gini_rate,1, sd, na.rm = TRUE))[,"SD"]
+Gini_sum <- data.frame(Gini_rate$country, Gini_SD)
+Gini_extreme <- top_n(Gini_sum, 20, Gini_SD) 
+inner_join(Gini_rate_tall, egrp, by = c('country' = 'country')) %>%
+  filter(country %in% Gini_extreme$Gini_rate.country) %>%
+  ggplot(aes(x = year, y = Gini_rate, color = country)) +
+  geom_line() +
+  theme_bw() + 
+  labs(title = 'Gini coefficient by Country',
+       x = element_blank(),
+       subtitle = 'Countries with most extreme range of values by SD')
+```
+
+As expected - we see wild swings in both directions. Its noteworthy how much wider the variation in inequality is in the 1980s, and how narrow this is before WW1. I am not an expert in history, however I was not surprised to see countries like South Africa and Iran, noted for their relatively recent or frequent shifts in power. That being said - seeing countries like Finland and the Netherlands on this list encourage me to learn more about their history. 
+
+As a final exploratory exercise with this data - lets see which countries are the most similar. For the sake of discovery, we will remove countries who have remained static in their inequality measure, and examine a potentially more interesting set of countries by filtering those whose Standard Deviation of their Gini coefficient is less than 6. 
+
+
+```{r, warning = FALSE}
+names(Gini_rate) <- as.numeric(str_replace_all(names(Gini_rate), 'X', ''))
+names(Gini_rate)[1] <- "country"
+Gini_cor_DF <- data.frame(cor(t(Gini_rate[-1])))
+Gini_cor_df <- Gini_cor_DF
+names(Gini_cor_DF) <- Gini_rate$country
+Gini_cor_DF$CountryA <- Gini_rate$country
+Gini_cor_DF <- Gini_cor_DF %>% 
+  pivot_longer(-CountryA,names_to = "CountryB",values_to = "Cor")%>%
+  filter(CountryA != CountryB)%>%
+  arrange(-Cor)
+Gini_extreme2 <- filter(Gini_sum,Gini_SD>6) 
+Gini_cor_DF_2 <- filter(Gini_cor_DF, CountryA %in% Gini_extreme2$Gini_rate.country) %>%
+    filter(CountryA>CountryB) %>%
+    filter(Cor > .9)
+Gini_cor_DF_2$Grp <- as.numeric(row.names(Gini_cor_DF_2))
+Gini_cor_DF_2 <- Gini_cor_DF_2 %>%
+  pivot_longer(cols = c(CountryA, CountryB),values_to = "Country")
+Gini_cor_DF_2 <- Gini_cor_DF_2[,-c(1,3)]
+inner_join(Gini_rate_tall,Gini_cor_DF_2, by = c('country' = 'Country')) %>%
+    filter(Grp<10) %>%
+    ggplot(aes(x = year, y = Gini_rate, color = country)) +
+  geom_line() +
+  facet_wrap(~Grp) +
+  theme_bw() + 
+  labs(title = 'Similar Gini values',
+       x = element_blank(),
+       subtitle = 'Correlation over 90%, each with a SD > 6')
+inner_join(Gini_rate_tall,Gini_cor_DF_2, by = c('country' = 'Country')) %>%
+    filter(Grp<19, Grp>9) %>%
+    ggplot(aes(x = year, y = Gini_rate, color = country)) +
+  geom_line() +
+  facet_wrap(~Grp) +
+  theme_bw() + 
+  labs(title = 'Similar Gini values',
+       x = element_blank(),
+       subtitle = 'Correlation over 90%, each with a SD > 6')
+```
+
+While it is possible (fairly likely) that some of these correlations are unrelated, this is an interesting visualization. Pairings like Greece and France seem significantly more likely than the Netherlands and Moldova. 
+
+
+## Models
+
+In this section, let's create models to see if we can predict certain behaviors based on our basic education data.
+
+### Pairs Plot
+
+```{r, warning = F, message = F}
+ggpairs(df, columns = 3:ncol(df))
+```
+
+Its no surprise that literacy rate and primary school completion rate have a strong correlation. Reading is taught in primary school and we can make the assumption that even with the gap in time between when a person completes primary school and when they're considered an adult, that the primary school completion rate can be a proxy for the effective value of basic education within a nation in any given year.
+
+Interestingly enough, there's a weak correlation between adult literacy rate and the suicide rate. It's a bit scary to think that there's a link between being able to read and suicide. There's also a weak negative correlation between the primary school completion rate and the murder rate.
+
+### Murder
+
+Let's see if murder can be predicted by basic education statistics. We'll try multiple regression and then use backwards elimination to get our final model.
+
+```{r}
+mm <- lm(murder_rate ~ literacy_rate + pschool_crate + pschool_erate, data = df)
+summary(mm)$r.squared
+```
+
+It looks like this model is worthless. It's not exactly a surprise that literacy and information about primary school are weak indicators for murder. 
+
+What would a model look like with just primary school completion rate, which showed a weak correlation?
+
+```{r, warning = F, message = F}
+mm2 <- lm(murder_rate ~ pschool_crate, data = df)
+summary(mm2)$r.squared
+```
+
+It looks like this simple linear regression has better results, but its still not robust enough to be useful. With an $R^2$ of .1, only 10% of the variance is explained by the model.
+
+
+```{r, warning = F}
+df$pred <- predict(mm2, df)
+df$resid <- df$murder_rate - df$pred
+filter(df, !is.na(df$murder_rate)) %>%
+ggplot(aes(x = pred, y = resid)) +
+  geom_point(alpha = .1) +
+  geom_hline(yintercept = 0, linetype = 3) +
+  theme_bw() +
+  labs(title = 'Predictions vs Residuals',
+       subtitle = 'Murder Rate Multiple Regression Model Evaluation',
+       x = 'Predictions',
+       y = 'Residuals')
+filter(df, !is.na(murder_rate)) %>%
+  ggplot(aes(x = pred, y = murder_rate)) +
+  geom_point(alpha = .1) +
+  geom_abline(slope = 1, linetype = 3) +
+  scale_x_continuous(limits = c(0, 50)) +
+  theme_bw() +
+  labs(title = 'Predictions vs Actuals',
+       subtitle = 'Murder Rate Multiple Regression Model Evaluation',
+       x = 'Predictions',
+       y = 'Murder Rate')
+```
+
+
+#### Murder with Random Forest
+
+Earlier, we saw that there was a negative correlation between and murder rate and primary school completion rate. Let's try and see if a random forest model will produce a model with better predictions.
+
+```{r}
+set.seed(321)
+# Random Forest Model
+x <- filter(df, !is.na(murder_rate) & !is.na(literacy_rate) & !is.na(pschool_crate))
+s <- sample(nrow(x), nrow(x) * .7)
+train <- x[s,]
+test <- x[-s,]
+rf <- train(murder_rate ~ literacy_rate + pschool_crate, data = train, model = 'rf')
+test$pred <- predict(rf, newdata = test)
+test$resid <- test$murder_rate - test$pred
+ggplot(test, aes(x = pred, y = resid)) +
+  geom_point() +
+  geom_hline(yintercept = 0, linetype = 3) +
+  theme_bw() +
+  labs(title = 'Predicted vs Residuals',
+       x = 'Predicted',
+       y = 'Residuals')
+ggplot(test, aes(x = pred, y = murder_rate)) +
+  geom_point() +
+  geom_abline(slope = 1, linetype = 3) +
+  theme_bw() +
+  labs(title = 'Predicted vs Actuals',
+       x = 'Predicted',
+       y = 'Actual Murder Rate')
+rf
+```
+
+Based on the $R^2$ returned by the random forest, this model isn't quite up to par either.
+
+### Suicide
+
+What about suicide? Let's use a similar procedure to determine whether the data we have available can predict suicide rates based on basic education.
+
+```{r}
+sm <- lm(suicide_rate ~ literacy_rate + pschool_crate + pschool_erate, data = df)
+summary(sm)
+```
+
+It seems like this model is stronger than the one that predicts murder, since the $R^2$ is higher. Let's use backwards elimination to see if we can reduce the variance in the next model.
+
+```{r}
+sm2 <- lm(suicide_rate ~ literacy_rate + pschool_erate, data = df)
+summary(sm2)$r.squared
+```
+
+It looks like the linear regression using one explanatory variable results in the best relative model. Let's take a look at how this model looks.
+
+```{r, warning = F}
+df$pred <- predict(sm2, df)
+df$resid <- df$suicide_rate - df$pred
+filter(df, !is.na(df$suicide_rate)) %>%
+ggplot(aes(x = pred, y = resid)) +
+  geom_point() +
+  geom_hline(yintercept = 0, linetype = 3) +
+  theme_bw() +
+  labs(title = 'Predictions vs Residuals',
+       subtitle = 'Suicide Rate Multiple Regression Model Evaluation',
+       x = 'Predictions',
+       y = 'Residuals')
+filter(df, !is.na(suicide_rate)) %>%
+  ggplot(aes(x = pred, y = suicide_rate)) +
+  geom_point() +
+  geom_abline(slope = 1, linetype = 3) +
+  scale_x_continuous(limits = c(0, 50)) +
+  theme_bw() +
+  labs(title = 'Predictions vs Actuals',
+       subtitle = 'Suicide Rate Multiple Regression Model Evaluation',
+       x = 'Predictions',
+       y = 'Suicide Rate')
+```
+
+It looks like this multiple regression model isn't very robust.
+
+Let's try to build a random forest model using literacy and primary school completion rate as the dependent variable. Using all 3 variables wouldn't leave us with enough observations to run a reasonable model.
+
+#### Random Forest
+
+```{r}
+set.seed(123)
+# Random Forest Model
+# x <- filter(df, !is.na(literacy_rate) & !is.na(suicide_rate))
+x <- filter(df, !is.na(literacy_rate) & !is.na(suicide_rate) & !is.na(pschool_crate))
+s <- sample(nrow(x), nrow(x) * .7)
+train <- x[s,]
+test <- x[-s,]
+# rf <- train(suicide_rate ~ literacy_rate, data = train, model = 'rf')
+rf <- train(suicide_rate ~ literacy_rate + pschool_crate, data = train, model = 'rf')
+test$pred <- predict(rf, newdata = test)
+test$resid <- test$suicide_rate - test$pred
+ggplot(test, aes(x = pred, y = resid)) +
+  geom_point() +
+  geom_hline(yintercept = 0, linetype = 3) +
+  theme_bw() +
+  labs(title = 'Predicted vs Residuals',
+       x = 'Predicted',
+       y = 'Residuals')
+ggplot(test, aes(x = pred, y = suicide_rate)) +
+  geom_point() +
+  geom_abline(slope = 1, linetype = 3) +
+  theme_bw() +
+  labs(title = 'Predicted vs Actuals',
+       x = 'Predicted',
+       y = 'Actual Suicide Rate')
+rf
+```
+
+It looks like a random forest model with literacy rate and primary school completion rate is a better predictor of suicides compared to a multiple linear regression. Still, even with the best model, the predictions won't be very convincing.
+
+### Vaccination 
+
+As we saw above, the rates of MCV and DTP vaccination appear very correlated. Lets measure to what degree:
+
+```{r warning=FALSE}
+Vax_lm <- lm(DTP_rate ~ MCV_rate, data = df)
+summary(Vax_lm)$r.squared
+df %>%
+ggplot(aes(x = MCV_rate, y = DTP_rate)) +
+  geom_point() +
+  geom_smooth(method = "lm", size =2) +
+  theme_bw() + 
+  theme(legend.position = 'none') +
+  labs(title = 'MCV vs DTP Vaccination Rate')+
+  geom_abline(slope = 1, size = 2, colour = "red")
+
+```
+
+Reviewing these metrics, we do indeed find that these are very correlated. Our $R^2$ is .80. 
+
+Lets now look at the predicting power of education on vaccination rate starting with DTP. 
+
+```{r}
+DTP_lm <- lm(DTP_rate ~ literacy_rate + pschool_crate + pschool_erate, data = df)
+summary(DTP_lm)
+DTP_lm2 <- lm(DTP_rate ~ pschool_crate + pschool_erate, data = df)
+summary(DTP_lm2)
+DTP_lm3 <- lm(DTP_rate ~ pschool_crate, data = df)
+summary(DTP_lm3)
+```
+
+Starting with each of our predictor variables, seems things initially promising: an $R^2$ of 32% with the P Value of the variable Literacy Rate very high at .36. When we remove Literacy Rate, our $R^2$ climbed further. When we limited our variables to Public School Completion rate, our $R^2$ increased yet again to 40%, implying that this alone is a stronger predictor than any other combination.  
+
+```{r warning= FALSE}
+df %>%
+ggplot(aes(x = pschool_crate, y = DTP_rate)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  theme_bw() + 
+  theme(legend.position = 'none') +
+  labs(title = 'Public School Completion vs DTP Vaccine Rates')
+#hist(DTP_lm3$residuals)
+
+ggplot(DTP_lm3, aes(x=DTP_lm3$residuals)) + geom_histogram(binwidth = 5)+
+  labs(title = 'DTP Residuals Histogram')
+
+```
+
+Looking towards measles we initially see a higher $R^2$, yet, this only decreases as we remove variables: 
+
+```{r}
+MCV_lm <- lm(MCV_rate ~ literacy_rate + pschool_crate + pschool_erate, data = df)
+summary(MCV_lm)$r.squared
+MCV_lm2 <- lm(MCV_rate ~ pschool_crate + pschool_erate, data = df)
+summary(MCV_lm2)$r.squared
+```
+
+
+#### Vaccinations with Random Forest 
+
+Lets create a test a model with Random Forest and see if this fares any better. We will begin by filtering the dataframe and removing country/year pairings with any null values. 
+
+```{r}
+library(tidymodels)
+vax_df <- filter(df, !is.na(literacy_rate) & !is.na(pschool_erate) & !is.na(pschool_crate))
+dim(vax_df)
+```
+
+This only leaves us with 144 values - not enough to train our dataset. As Literacy Rate fared the worst in our linear regression, lets remove that and reassess. 
+
+```{r}
+vax_df2 <- filter(df, !is.na(pschool_erate) & !is.na(pschool_crate)  & !is.na(MCV_rate))
+dim(vax_df2)
+```
+
+This seems appropriate - lets move forward. 
+
+```{r}
+#may as well use the seed my parter selected earlier 
+set.seed(123)
+vax_samp <- initial_split(vax_df2, .75)
+vax_train <- training(vax_samp)
+vax_test  <- testing(vax_samp)
+```
+```{r}
+vax_model <- 
+  rand_forest(trees = 500) %>%
+  set_mode("regression") %>%
+  set_engine("randomForest")
+vax_model_fit <- parsnip::fit(vax_model, MCV_rate ~ pschool_crate + pschool_erate, vax_train)
+vax_model_result <- vax_model_fit %>%
+  predict(new_data = vax_test)
+vax_model_result$Actual<-vax_test$MCV_rate
+names(vax_model_result)[1] <- "Prediction"
+vax_model_fit
+```
+The $R^2$ is close to, but a little worse than the one which we arrived at with Linear modeling above. That being said - it is in the same realm. Lets test this model against our testing sample: 
+
+```{r}
+vax_model_result %>%
+ggplot(aes(x = Prediction, y = Actual)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  theme_bw() + 
+  theme(legend.position = 'none') +
+  geom_abline(slope = 1, colour = "red") +
+  labs(title = 'MCV Model: Predictions vs Actual')
+vax_model_result$Resid <- vax_model_result$Actual - vax_model_result$Prediction
+vax_model_result %>%
+ggplot(aes(x = Actual, y = Resid)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  theme_bw() + 
+  geom_abline(slope = 0, colour = "red")+
+  theme(legend.position = 'none') +
+  labs(title = 'MCV Model: Residuals vs Actual')
+
+vax_model_result %>%
+  ggplot(aes(x= Resid)) + geom_histogram(binwidth = 3)+
+  labs(title = 'MCV Residuals Histogram')
+```
+
+These are some interesting graphs. At first glance our model seems very successful. The predicted values are on average very close to the actual values for our testing sample. That being said - the model becomes significantly less accurate as the actual vaccination rate moves down from 100%. This could be said to have failed the condition of constant variability. 
+
+### Gini coefficient 
+
+Initially, the logic in searching for correlations between education and inequality was that, as a population becomes more educated, the GDP would increase and the population more engaged in democracy, which independently might lead to a move from a rigid class structure. After viewing the data, however, the erraticness of this response variable gives me little hope in finding correlations: 
+
+```{r}
+Gini_lm <- lm(Gini_rate ~ literacy_rate + pschool_crate + pschool_erate, data = df)
+summary(Gini_lm)$r.squared
+Gini_lm2 <- lm(Gini_rate ~pschool_erate, data = df)
+summary(Gini_lm2)$r.squared
+```
+
+Immediately we see a very low $R^2$. 
+
+As linear modeling does not seem to work with a variable of this nature, lets see if a Random Forest approach might be more effective: 
+
+```{r}
+
+gini_df <-filter(df, !is.na(pschool_erate) & !is.na(pschool_crate)  & !is.na(Gini_rate)) 
+set.seed(123)
+gini_samp <- initial_split(gini_df, .75)
+gini_train <- training(gini_samp)
+gini_test  <- testing(gini_samp)
+```
+```{r}
+gini_model <- 
+  rand_forest(trees = 500) %>%
+  set_mode("regression") %>%
+  set_engine("randomForest")
+gini_model_fit <- parsnip::fit(gini_model, Gini_rate ~ pschool_crate + pschool_erate, gini_train)
+gini_model_result <- gini_model_fit %>%
+  predict(new_data = gini_test)
+gini_model_result$Actual<-gini_test$Gini_rate
+names(gini_model_result)[1] <- "Prediction"
+gini_model_fit
+```
+We find that this model give us significantly more explanation into Gini coefficient as a response variable. Lets take a look at the correlation and the distribution of residuals: 
+
+```{r}
+gini_model_result %>%
+ggplot(aes(x = Prediction, y = Actual)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  theme_bw() + 
+  theme(legend.position = 'none') +
+  geom_abline(slope = 1, colour = "red") +
+  labs(title = 'Gini Model: Predictions vs Actual')
+gini_model_result$Resid <- gini_model_result$Actual - gini_model_result$Prediction
+gini_model_result %>%
+ggplot(aes(x = Actual, y = Resid)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  theme_bw() + 
+  geom_abline(slope = 0, colour = "red")+
+  theme(legend.position = 'none') +
+  labs(title = 'Gini Model: Residuals vs Actual')
+
+gini_model_result %>%
+  ggplot(aes(x=Resid)) + geom_histogram(binwidth = 3)+
+  labs(title = 'Gini Residuals Histogram')
+
+```
+
+While it is clear the correlation is weak, the trend line is not awful. The distribution of the residuals is fairly interesting: it seems that our model is a decent predictor of the Gini Coefficient for values between -20 and 20. For values higher than this, we see some outliers. This raises questions about our testing sample - it is possible that an out-sized number of these larger Gini values ended up in our testing set. 
+
+
+## Conclusion
+
+Before doing this research, I guessed there would be a negative correlation between basic education vs murder and suicide. As expected, it turns out that that is a generalizing assumption that isn't based on data, at least not here. We were able to determine that most people across different countries in the world have been getting more basic education. On the other hand, we're looking at averages of entire countries over the course of one year as one observation. It's difficult to create an accurate model when we're working with data that has already been reduced. Also, the concept of murder and suicide is highly complicated and there's countless circumstances that influence these behaviors.
+
+In other words, it was probably too simplistic to believe that these rare and strange events could be predicted a common behavior like basic education. Seems much clearer now compared to before we mined the data.
+
+Looking toward vaccination rate - with a relatively small amount of variation across countries compared to our explanatory variables, I did not have a lot of hope in our ability to predict vaccination rate. I was pleasantly surprised with how our models preformed. Taking a broader view, however, it is unclear on the role education plays in vaccination. The most likely relativity is that vaccinations are compulsory in places where primary school is equally mandated - leading to the correlation we were able to model. 
+
+Finally, the Gini Coefficient was an interesting variable to work with. I was disappointed in the quality of the data, however, I was also pleasantly surprised in how much better the random forest approach preformed over linear modeling. While I was expecting a negative correlation, finding a positive correlation was enlightening. 
